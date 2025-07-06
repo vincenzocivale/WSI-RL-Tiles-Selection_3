@@ -1,11 +1,3 @@
-"""
-Trident Pipeline Manager - A module for managing WSI processing workflows.
-
-This module provides a PipelineManager class that tracks the state of WSI processing
-tasks (segmentation, coordinate extraction, feature extraction) and only performs
-missing operations for each sample.
-"""
-
 import os
 import json
 import hashlib
@@ -13,14 +5,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 from datetime import datetime
-
 import torch
 import h5py
 import pandas as pd
 from trident import Processor
 from trident.segmentation_models.load import segmentation_model_factory
 from trident.patch_encoder_models.load import encoder_factory
-
 
 @dataclass
 class SampleState:
@@ -38,7 +28,6 @@ class SampleState:
     def __post_init__(self):
         if not self.last_updated:
             self.last_updated = datetime.now().isoformat()
-
 
 @dataclass
 class PipelineConfig:
@@ -59,13 +48,14 @@ class PipelineConfig:
     # Feature extraction parameters
     patch_encoder: str = 'conch_v15'
     patch_encoder_ckpt_path: Optional[str] = None
+    mpp: Optional[float] = None
     
     # Processing parameters
     batch_size: int = 64
     gpu: int = 0
     max_workers: Optional[int] = None
     skip_errors: bool = True
-
+    reader_type: Optional[str] = None
 
 class PipelineManager:
     """
@@ -78,6 +68,7 @@ class PipelineManager:
     def __init__(self, 
                  job_dir: str,
                  wsi_dir: str,
+                 hest_dataset_root_dir: Optional[str] = None, # NEW: Root of the HEST dataset
                  config: Optional[PipelineConfig] = None,
                  wsi_ext: Optional[List[str]] = None):
         """
@@ -86,19 +77,22 @@ class PipelineManager:
         Args:
             job_dir: Directory to store all outputs
             wsi_dir: Directory containing WSI files
+            hest_dataset_root_dir: Optional. Root directory of the MahmoodLab/hest dataset.
+                                   If provided, it will scan for existing outputs here.
             config: Pipeline configuration (uses defaults if None)
             wsi_ext: List of allowed WSI file extensions
         """
         self.job_dir = Path(job_dir)
         self.wsi_dir = Path(wsi_dir)
+        self.hest_dataset_root_dir = Path(hest_dataset_root_dir) if hest_dataset_root_dir else None # Store the HEST root
         self.config = config or PipelineConfig()
-        self.wsi_ext = wsi_ext
+        self.wsi_ext = wsi_ext or ['.tif', '.tiff', '.svs', '.ndpi'] # Default common WSI extensions
         
         # Create output directory structure
         self.job_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.job_dir / "pipeline_state.json"
         
-        # Initialize subdirectories
+        # Initialize subdirectories for pipeline generated outputs
         self.seg_dir = self.job_dir / "segmentation"
         self.coords_dir = self.job_dir / f"coordinates_{self.config.mag}x_{self.config.patch_size}px"
         self.features_dir = self.job_dir / f"features_{self.config.mag}x_{self.config.patch_size}px_{self.config.patch_encoder}"
@@ -108,11 +102,13 @@ class PipelineManager:
         
         # Initialize processor
         self.processor = Processor(
-            job_dir=str(self.job_dir),
+            job_dir=str(self.job_dir), # Trident will save outputs relative to this
             wsi_source=str(self.wsi_dir),
             wsi_ext=self.wsi_ext,
             skip_errors=self.config.skip_errors,
             max_workers=self.config.max_workers,
+            reader_type=self.config.reader_type,
+            mpp=self.config.mpp,
         )
         
         # Load or initialize state
@@ -130,7 +126,7 @@ class PipelineManager:
                     data = json.load(f)
                 return {k: SampleState(**v) for k, v in data.items()}
             except Exception as e:
-                print(f"Warning: Could not load state file: {e}")
+                print(f"Warning: Could not load state file {self.state_file}: {e}")
         return {}
     
     def _save_state(self):
@@ -142,20 +138,35 @@ class PipelineManager:
     def _update_sample_state(self, sample_id: str, **kwargs):
         """Update sample state and save to disk."""
         if sample_id not in self.samples:
-            # Initialize new sample
-            wsi_files = list(self.wsi_dir.glob("*"))
-            if self.wsi_ext:
-                wsi_files = [f for f in wsi_files if f.suffix.lower() in [ext.lower() for ext in self.wsi_ext]]
-            
-            matching_files = [f for f in wsi_files if f.stem == sample_id]
-            if not matching_files:
-                raise ValueError(f"No WSI file found for sample_id: {sample_id}")
-            
-            self.samples[sample_id] = SampleState(
-                sample_id=sample_id,
-                wsi_path=str(matching_files[0])
-            )
-        
+            # If sample_id not in self.samples, it means discover_samples hasn't run or failed for it
+            # Try to find the WSI path for the new sample_id
+            wsi_file_found = False
+            for ext in self.wsi_ext:
+                possible_wsi_path = self.wsi_dir / f"{sample_id}{ext}"
+                if possible_wsi_path.is_file():
+                    self.samples[sample_id] = SampleState(
+                        sample_id=sample_id,
+                        wsi_path=str(possible_wsi_path)
+                    )
+                    wsi_file_found = True
+                    break
+            if not wsi_file_found:
+                # Fallback: search all WSIs for a matching stem
+                all_wsi_files = list(self.wsi_dir.glob(f"*{sample_id}*"))
+                if self.wsi_ext:
+                    all_wsi_files = [f for f in all_wsi_files if f.suffix.lower() in [ext.lower() for ext in self.wsi_ext]]
+                
+                matching_wsi = [f for f in all_wsi_files if f.stem == sample_id and f.is_file()]
+                if matching_wsi:
+                    self.samples[sample_id] = SampleState(
+                        sample_id=sample_id,
+                        wsi_path=str(matching_wsi[0])
+                    )
+                else:
+                    print(f"Warning: WSI file not found for new sample_id: {sample_id}. State will be incomplete.")
+                    # Still create a placeholder state
+                    self.samples[sample_id] = SampleState(sample_id=sample_id, wsi_path="")
+
         # Update fields
         for key, value in kwargs.items():
             if hasattr(self.samples[sample_id], key):
@@ -171,7 +182,7 @@ class PipelineManager:
             wsi_files = [f for f in wsi_files if f.suffix.lower() in [ext.lower() for ext in self.wsi_ext]]
         
         if not wsi_files:
-            raise FileNotFoundError(f"No WSI files with extensions {self.wsi_ext} found in {self.wsi_dir}")
+            print(f"Warning: No WSI files with extensions {self.wsi_ext} found in {self.wsi_dir}")
         
         sample_ids = []
         for wsi_file in wsi_files:
@@ -193,230 +204,199 @@ class PipelineManager:
         return sample_ids
     
     def _scan_existing_outputs(self):
-        """Scan for existing output files and update sample states."""
-        for sample_id in self.samples.keys():
-            # Check for segmentation files - including .h5ad files
-            if not self.samples[sample_id].segmentation_done:
+        """Scan for existing output files and update sample states, including HEST dataset specific paths."""
+        print("Scanning for existing outputs...")
+        # Iterate over a copy of keys as _update_sample_state modifies self.samples
+        for sample_id in list(self.samples.keys()): 
+            sample_state = self.samples[sample_id]
+
+            # --- Check for Segmentation files ---
+            if not sample_state.segmentation_done:
+                # Common patterns from Trident/general
                 seg_patterns = [
-                    f"{sample_id}_segmentation.h5",
-                    f"{sample_id}_segmentation.h5ad",
-                    f"{sample_id}.h5",
-                    f"{sample_id}.h5ad",
-                    f"*{sample_id}*segmentation*.h5",
-                    f"*{sample_id}*segmentation*.h5ad",
-                    f"*{sample_id}*seg*.h5",
-                    f"*{sample_id}*seg*.h5ad"
+                    f"{sample_id}_segmentation.h5", f"{sample_id}_segmentation.h5ad",
+                    f"{sample_id}.h5", f"{sample_id}.h5ad",
+                    f"*{sample_id}*seg*.h5", f"*{sample_id}*seg*.h5ad"
                 ]
+                # HEST specific segmentation patterns
+                if self.hest_dataset_root_dir and (self.hest_dataset_root_dir / "tissue_seg").exists():
+                    seg_patterns.extend([
+                        f"{sample_id}_mask.jpg",
+                        f"{sample_id}_mask.pkl",
+                    ])
                 
+                found_seg_path = None
+                # Search in job_dir and hest_dataset_root_dir subdirectories
+                search_dirs = [self.job_dir, self.seg_dir]
+                if self.hest_dataset_root_dir:
+                    search_dirs.append(self.hest_dataset_root_dir / "tissue_seg")
+
                 for pattern in seg_patterns:
-                    seg_files = list(self.job_dir.glob(f"**/{pattern}"))
-                    if seg_files:
-                        self._update_sample_state(
-                            sample_id,
-                            segmentation_done=True,
-                            segmentation_path=str(seg_files[0])
-                        )
+                    for s_dir in search_dirs:
+                        if not s_dir.exists():
+                            continue
+                        # Use rglob for recursive search within the target directory
+                        for f_path in s_dir.rglob(f"**/{pattern}"):
+                            if f_path.is_file():
+                                found_seg_path = str(f_path)
+                                break
+                        if found_seg_path:
+                            break
+                    if found_seg_path:
                         break
             
-            # Check for coordinate files - including .h5ad files
-            if not self.samples[sample_id].coordinates_done:
+                if found_seg_path:
+                    self._update_sample_state(
+                        sample_id,
+                        segmentation_done=True,
+                        segmentation_path=found_seg_path
+                    )
+                    # print(f"Found existing segmentation for {sample_id}: {found_seg_path}")
+
+
+            # --- Check for Coordinate/Patch files ---
+            if not sample_state.coordinates_done:
+                # Common patterns from Trident/general
                 coord_patterns = [
-                    f"{sample_id}_coordinates.h5",
-                    f"{sample_id}_coordinates.h5ad",
-                    f"{sample_id}_coords.h5",
-                    f"{sample_id}_coords.h5ad",
-                    f"{sample_id}.h5",
-                    f"{sample_id}.h5ad",
-                    f"*{sample_id}*coord*.h5",
-                    f"*{sample_id}*coord*.h5ad",
-                    f"*{sample_id}*patch*.h5",
-                    f"*{sample_id}*patch*.h5ad"
+                    f"{sample_id}_coordinates.h5", f"{sample_id}_coordinates.h5ad",
+                    f"{sample_id}_coords.h5", f"{sample_id}_coords.h5ad",
+                    f"{sample_id}.h5", f"{sample_id}.h5ad", # HEST patches are often {id}.h5
+                    f"*{sample_id}*coord*.h5", f"*{sample_id}*coord*.h5ad",
+                    f"*{sample_id}*patch*.h5", f"*{sample_id}*patch*.h5ad",
                 ]
                 
+                found_coord_path = None
+                # Search in job_dir, coords_dir, and hest_dataset_root_dir/patches
+                search_dirs = [self.job_dir, self.coords_dir]
+                if self.hest_dataset_root_dir:
+                    search_dirs.append(self.hest_dataset_root_dir / "patches") # HEST patches directory
+
                 for pattern in coord_patterns:
-                    coord_files = list(self.job_dir.glob(f"**/{pattern}"))
-                    if coord_files:
-                        self._update_sample_state(
-                            sample_id,
-                            coordinates_done=True,
-                            coordinates_path=str(coord_files[0])
-                        )
+                    for s_dir in search_dirs:
+                        if not s_dir.exists():
+                            continue
+                        for f_path in s_dir.rglob(f"**/{pattern}"):
+                            if f_path.is_file():
+                                found_coord_path = str(f_path)
+                                break
+                        if found_coord_path:
+                            break
+                    if found_coord_path:
                         break
             
-            # Check for feature files - including .h5ad files
-            if not self.samples[sample_id].features_done:
+                if found_coord_path:
+                    self._update_sample_state(
+                        sample_id,
+                        coordinates_done=True,
+                        coordinates_path=found_coord_path
+                    )
+                    # print(f"Found existing coordinates/patches for {sample_id}: {found_coord_path}")
+
+            # --- Check for Feature files ---
+            # Even if coordinates are found (e.g., HEST patches), features might still need extraction
+            if not sample_state.features_done:
+                # Common patterns from Trident/general
                 feat_patterns = [
-                    f"{sample_id}_features.h5",
-                    f"{sample_id}_features.h5ad",
-                    f"{sample_id}_feat.h5",
-                    f"{sample_id}_feat.h5ad",
-                    f"{sample_id}.h5",
-                    f"{sample_id}.h5ad",
-                    f"*{sample_id}*feature*.h5",
-                    f"*{sample_id}*feature*.h5ad",
-                    f"*{sample_id}*feat*.h5",
-                    f"*{sample_id}*feat*.h5ad"
+                    f"{sample_id}_features.h5", f"{sample_id}_features.h5ad",
+                    f"{sample_id}_feat.h5", f"{sample_id}_feat.h5ad",
+                    f"*{sample_id}*feature*.h5", f"*{sample_id}*feature*.h5ad",
+                    f"*{sample_id}*feat*.h5", f"*{sample_id}*feat*.h5ad",
                 ]
-                
+                # HEST 'patches' directory might contain pre-extracted features
+                # if so, their filename might follow some pattern
+                if self.hest_dataset_root_dir and (self.hest_dataset_root_dir / "patches").exists():
+                    feat_patterns.append(f"{sample_id}.h5") # HEST patches themselves might be considered features if they already contain embeddings
+
+                found_feat_path = None
+                # Search in job_dir, features_dir, and hest_dataset_root_dir/patches
+                search_dirs = [self.job_dir, self.features_dir]
+                if self.hest_dataset_root_dir:
+                    search_dirs.append(self.hest_dataset_root_dir / "patches") # Search HEST patches directory for feature files too
+
                 for pattern in feat_patterns:
-                    feat_files = list(self.job_dir.glob(f"**/{pattern}"))
-                    if feat_files:
-                        self._update_sample_state(
-                            sample_id,
-                            features_done=True,
-                            features_path=str(feat_files[0])
-                        )
+                    for s_dir in search_dirs:
+                        if not s_dir.exists():
+                            continue
+                        for f_path in s_dir.rglob(f"**/{pattern}"):
+                            if f_path.is_file():
+                                # Check if it's explicitly a feature file or if the HEST patch .h5 contains features
+                                # This check might need refinement based on HEST .h5 content
+                                if "feature" in f_path.name.lower() or "feat" in f_path.name.lower():
+                                    found_feat_path = str(f_path)
+                                elif "patches" in str(f_path).lower() and self.hest_dataset_root_dir:
+                                    # If it's a HEST patch file, check if it contains 'features' group/dataset
+                                    try:
+                                        with h5py.File(f_path, 'r') as hf:
+                                            if 'features' in hf or 'embeddings' in hf: # Assuming HEST patches might contain these
+                                                found_feat_path = str(f_path)
+                                    except Exception as e:
+                                        pass # Not a valid H5 or no features found
+                                if found_feat_path:
+                                    break
+                        if found_feat_path:
+                            break
+                    if found_feat_path:
                         break
+            
+                if found_feat_path:
+                    self._update_sample_state(
+                        sample_id,
+                        features_done=True,
+                        features_path=found_feat_path
+                    )
+                    # print(f"Found existing features for {sample_id}: {found_feat_path}")
+        self._save_state() # Ensure state is saved after scan
+        print("Scan complete.")
     
     def get_pending_samples(self, task: str) -> List[str]:
         """Get samples that need processing for a specific task."""
         pending = []
         for sample_id, state in self.samples.items():
+            if not state.wsi_path or not Path(state.wsi_path).exists():
+                print(f"Skipping {sample_id}: WSI file not found at {state.wsi_path}")
+                continue # Skip samples where WSI is missing
+            
             if task == "segmentation" and not state.segmentation_done:
                 pending.append(sample_id)
-            elif task == "coordinates" and state.segmentation_done and not state.coordinates_done:
-                pending.append(sample_id)
-            elif task == "features" and state.coordinates_done and not state.features_done:
+            # For coordinates, we now check if HEST patches exist as an alternative
+            elif task == "coordinates" and not state.coordinates_done:
+                # Check if a HEST patch file exists that can serve as coordinates
+                hest_patch_file = None
+                if self.hest_dataset_root_dir and (self.hest_dataset_root_dir / "patches" / f"{sample_id}.h5").exists():
+                    hest_patch_file = self.hest_dataset_root_dir / "patches" / f"{sample_id}.h5"
+                
+                if not state.segmentation_done: # Segmentation must be done or existing
+                    continue # Cannot do coordinate extraction without segmentation (or pre-existing masks/patches)
+                elif hest_patch_file and hest_patch_file.is_file():
+                    # If HEST patches exist, consider coordinates done
+                    # This implies we will use HEST patches for feature extraction
+                    # We update the state here to reflect this
+                    self._update_sample_state(
+                        sample_id,
+                        coordinates_done=True,
+                        coordinates_path=str(hest_patch_file)
+                    )
+                    # This sample is now technically "done" for coordinates, so it won't be in pending
+                else:
+                    # If no HEST patch file, and internal coordinates not done, then it's pending
+                    pending.append(sample_id)
+            elif task == "features" and not state.features_done:
+                if not state.coordinates_done:
+                    continue # Cannot extract features without coordinates/patches
                 pending.append(sample_id)
         return pending
-    
-    def run_segmentation(self, sample_ids: Optional[List[str]] = None) -> int:
-        """Run segmentation for specified samples."""
-        if sample_ids is None:
-            sample_ids = self.get_pending_samples("segmentation")
-        
-        if not sample_ids:
-            print("No samples need segmentation.")
-            return 0
-        
-        print(f"Running segmentation for {len(sample_ids)} samples...")
-        
-        # Initialize segmentation model
-        segmentation_model = segmentation_model_factory(
-            self.config.segmenter,
-            confidence_thresh=self.config.seg_conf_thresh,
-        )
-        
-        artifact_remover_model = None
-        if self.config.remove_artifacts or self.config.remove_penmarks:
-            artifact_remover_model = segmentation_model_factory(
-                'grandqc_artifact',
-                remove_penmarks_only=self.config.remove_penmarks and not self.config.remove_artifacts
-            )
-        
-        # Run segmentation
-        self.processor.run_segmentation_job(
-            segmentation_model,
-            seg_mag=segmentation_model.target_mag,
-            holes_are_tissue=not self.config.remove_holes,
-            artifact_remover_model=artifact_remover_model,
-            batch_size=self.config.batch_size,
-            device=f'cuda:{self.config.gpu}',
-        )
-        
-        # Update state for processed samples - check for various possible output formats
-        processed_count = 0
-        for sample_id in sample_ids:
-            # Check for common segmentation output patterns
-            possible_paths = [
-                self.seg_dir / f"{sample_id}_segmentation.h5",
-                self.seg_dir / f"{sample_id}.h5",
-                self.job_dir / "segmentation" / f"{sample_id}_segmentation.h5",
-                self.job_dir / "segmentation" / f"{sample_id}.h5",
-            ]
-            
-            # Also check in job_dir subdirectories
-            for seg_file in self.job_dir.glob(f"**/segmentation/**/*{sample_id}*"):
-                if seg_file.is_file():
-                    possible_paths.append(seg_file)
-            
-            found_path = None
-            for path in possible_paths:
-                if path.exists():
-                    found_path = str(path)
-                    break
-            
-            if found_path:
-                self._update_sample_state(
-                    sample_id,
-                    segmentation_done=True,
-                    segmentation_path=found_path
-                )
-                processed_count += 1
-        
-        return processed_count
-    
-    def run_coordinate_extraction(self, sample_ids: Optional[List[str]] = None) -> int:
-        """Run coordinate extraction for specified samples."""
-        if sample_ids is None:
-            sample_ids = self.get_pending_samples("coordinates")
-        
-        if not sample_ids:
-            print("No samples need coordinate extraction.")
-            return 0
-        
-        for sample_id in sample_ids:
-            state = self.samples[sample_id]
-            if not state.segmentation_done or not state.segmentation_path or not Path(state.segmentation_path).exists():
-                raise FileNotFoundError(f"Segmentation output for {sample_id} not found. Cannot extract coordinates.")
-
-        print(f"Running coordinate extraction for {len(sample_ids)} samples...")
-        
-        # Run patching job
-        self.processor.run_patching_job(
-            target_magnification=self.config.mag,
-            patch_size=self.config.patch_size,
-            overlap=self.config.overlap,
-            saveto=str(self.coords_dir),
-            min_tissue_proportion=self.config.min_tissue_proportion,
-        )
-        
-        # Update state for processed samples - check for various possible output formats
-        processed_count = 0
-        for sample_id in sample_ids:
-            # Check for common coordinate output patterns
-            possible_paths = [
-                self.coords_dir / f"{sample_id}_coordinates.h5",
-                self.coords_dir / f"{sample_id}.h5",
-                self.coords_dir / f"{sample_id}_coords.h5",
-                self.coords_dir / f"{sample_id}.h5ad",
-            ]
-            
-            # Also check in job_dir subdirectories
-            for coord_file in self.job_dir.glob(f"**/coordinates*/**/*{sample_id}*"):
-                if coord_file.is_file():
-                    possible_paths.append(coord_file)
-            
-            found_path = None
-            for path in possible_paths:
-                if path.exists():
-                    found_path = str(path)
-                    break
-            
-            if found_path:
-                self._update_sample_state(
-                    sample_id,
-                    coordinates_done=True,
-                    coordinates_path=found_path
-                )
-                processed_count += 1
-        
-        return processed_count
-    
+ 
     def run_feature_extraction(self, sample_ids: Optional[List[str]] = None) -> int:
-        """Run feature extraction for specified samples."""
+        """Run feature extraction for specified samples.
+        Prioritizes HEST patch files if available for input.
+        """
         if sample_ids is None:
             sample_ids = self.get_pending_samples("features")
         
         if not sample_ids:
-            print("No samples need feature extraction.")
+            print("No samples need feature extraction or all are already done.")
             return 0
         
-        for sample_id in sample_ids:
-            state = self.samples[sample_id]
-            if not state.coordinates_done or not state.coordinates_path or not Path(state.coordinates_path).exists():
-                raise FileNotFoundError(f"Coordinates for {sample_id} not found. Cannot extract features.")
-
         print(f"Running feature extraction for {len(sample_ids)} samples...")
         
         # Initialize patch encoder
@@ -425,102 +405,91 @@ class PipelineManager:
             weights_path=self.config.patch_encoder_ckpt_path
         )
         
-        # Run feature extraction
-        self.processor.run_patch_feature_extraction_job(
-            coords_dir=str(self.coords_dir),
-            patch_encoder=encoder,
-            device=f'cuda:{self.config.gpu}',
-            saveas='h5',
-            batch_limit=self.config.batch_size,
-        )
-        
-        # Update state for processed samples - check for various possible output formats
         processed_count = 0
         for sample_id in sample_ids:
-            # Check for common feature output patterns
-            possible_paths = [
-                self.features_dir / f"{sample_id}_features.h5",
-                self.features_dir / f"{sample_id}.h5",
-                self.features_dir / f"{sample_id}_feat.h5",
-                self.features_dir / f"{sample_id}.h5ad",
-            ]
+            state = self.samples[sample_id]
             
-            # Also check in job_dir subdirectories for feature files
-            for feat_file in self.job_dir.glob(f"**/features*/**/*{sample_id}*"):
-                if feat_file.is_file():
-                    possible_paths.append(feat_file)
+            # Determine the input path for patch features (either HEST patches or pipeline-generated coords)
+            input_patch_path: Optional[Path] = None
+            if state.coordinates_path and Path(state.coordinates_path).exists():
+                input_patch_path = Path(state.coordinates_path)
             
-            # Check for files in the default Trident output structure
-            for feat_file in self.job_dir.glob(f"**/*{sample_id}*_features.h5"):
-                possible_paths.append(feat_file)
+            if not input_patch_path:
+                print(f"Skipping feature extraction for {sample_id}: No valid coordinates/patches found.")
+                continue
+
+            # Ensure the input path is an H5 file (or anndata compatible)
+            if not str(input_patch_path).lower().endswith(('.h5', '.h5ad')):
+                print(f"Skipping feature extraction for {sample_id}: Input path {input_patch_path} is not a recognized H5/H5AD format.")
+                continue
+
+            # Determine output path for features
+            # Trident's `run_patch_feature_extraction_job` will save to a subdirectory under `job_dir`
+            # based on its internal logic, typically `job_dir/patch_features/` or similar.
+            # We will then search for the generated file.
             
-            found_path = None
-            for path in possible_paths:
-                if path.exists():
-                    found_path = str(path)
-                    break
-            
-            if found_path:
-                self._update_sample_state(
-                    sample_id,
-                    features_done=True,
-                    features_path=found_path
+            print(f"  Extracting features for {sample_id} from {input_patch_path}...")
+            try:
+                # The processor expects coords_dir to be a directory
+                # If input_patch_path is a specific file, we need to pass its parent directory
+                coords_input_dir_for_trident = input_patch_path.parent 
+                
+                # If Trident's processor was initialized with job_dir, it will save
+                # new features to job_dir/patch_features or similar
+                self.processor.run_patch_feature_extraction_job(
+                    coords_dir=str(coords_input_dir_for_trident), # Pass the directory where the input .h5 is
+                    patch_encoder=encoder,
+                    device=f'cuda:{self.config.gpu}',
+                    saveas='h5', # Ensure saving as H5
+                    batch_limit=self.config.batch_size,
                 )
-                processed_count += 1
+                
+                # After running, check for the output feature file.
+                # Trident typically saves features under `job_dir/patch_features/` or `job_dir/features_<encoder_name>/`
+                # or similar. We need to be robust in finding it.
+                
+                found_feat_output_path = None
+                # Patterns for output files generated by Trident based on its internal saving logic
+                output_patterns = [
+                    self.features_dir / f"{sample_id}_features.h5", # Our pre-defined features_dir
+                    self.features_dir / f"{sample_id}.h5",
+                    self.job_dir / "patch_features" / f"{sample_id}_features.h5", # Common Trident default
+                    self.job_dir / "patch_features" / f"{sample_id}.h5",
+                    self.job_dir / f"features_{self.config.mag}x_{self.config.patch_size}px_{self.config.patch_encoder}" / f"{sample_id}_features.h5",
+                    self.job_dir / f"features_{self.config.mag}x_{self.config.patch_size}px_{self.config.patch_encoder}" / f"{sample_id}.h5",
+                ]
+
+                # Also search more broadly in the job_dir for any .h5 output matching the sample_id
+                for p_path in self.job_dir.rglob(f"**/*{sample_id}*.h5"):
+                    if "features" in p_path.name.lower() or "feat" in p_path.name.lower():
+                        output_patterns.append(p_path)
+                
+                # Check for the first existing path
+                for path_candidate in output_patterns:
+                    if path_candidate.exists() and path_candidate.is_file():
+                        found_feat_output_path = str(path_candidate)
+                        break
+
+                if found_feat_output_path:
+                    self._update_sample_state(
+                        sample_id,
+                        features_done=True,
+                        features_path=found_feat_output_path
+                    )
+                    processed_count += 1
+                    print(f"  Successfully extracted and saved features for {sample_id} to {found_feat_output_path}")
+                else:
+                    print(f"  Warning: Feature output not found for {sample_id} after running job. Please check Trident logs.")
+
+            except Exception as e:
+                print(f"  Error extracting features for {sample_id}: {e}")
         
         return processed_count
     
-    def run_full_pipeline(self, sample_ids: Optional[List[str]] = None) -> Dict[str, int]:
-        """Run the complete pipeline for specified samples."""
-        if sample_ids is None:
-            sample_ids = self.discover_samples()
-        
-        results = {}
-        
-        # Run segmentation
-        seg_pending = [s for s in sample_ids if s in self.get_pending_samples("segmentation")]
-        results['segmentation'] = self.run_segmentation(seg_pending)
-        
-        # Run coordinate extraction
-        coords_pending = [s for s in sample_ids if s in self.get_pending_samples("coordinates")]
-        results['coordinates'] = self.run_coordinate_extraction(coords_pending)
-        
-        # Run feature extraction
-        feat_pending = [s for s in sample_ids if s in self.get_pending_samples("features")]
-        results['features'] = self.run_feature_extraction(feat_pending)
-        
-        return results
+
+
     
-    def get_summary(self) -> Dict[str, int]:
-        """Get processing summary statistics."""
-        total = len(self.samples)
-        seg_done = sum(1 for s in self.samples.values() if s.segmentation_done)
-        coords_done = sum(1 for s in self.samples.values() if s.coordinates_done)
-        feat_done = sum(1 for s in self.samples.values() if s.features_done)
-        
-        return {
-            'total_samples': total,
-            'segmentation_completed': seg_done,
-            'coordinates_completed': coords_done,
-            'features_completed': feat_done,
-            'segmentation_pending': total - seg_done,
-            'coordinates_pending': total - coords_done,
-            'features_pending': total - feat_done,
-        }
-    
-    def print_summary(self):
-        """Print processing summary."""
-        summary = self.get_summary()
-        print("\n" + "="*50)
-        print("PIPELINE SUMMARY")
-        print("="*50)
-        print(f"Total samples: {summary['total_samples']}")
-        print(f"Segmentation: {summary['segmentation_completed']}/{summary['total_samples']} completed")
-        print(f"Coordinates: {summary['coordinates_completed']}/{summary['total_samples']} completed")
-        print(f"Features: {summary['features_completed']}/{summary['total_samples']} completed")
-        print("="*50)
-    
-    def debug_output_files(self):
+
         """Debug method to show what files actually exist in the output directories."""
         print("\n" + "="*60)
         print("DEBUG: OUTPUT FILES")
@@ -530,7 +499,11 @@ class PipelineManager:
         print(f"Segmentation directory: {self.seg_dir}")
         print(f"Coordinates directory: {self.coords_dir}")
         print(f"Features directory: {self.features_dir}")
-        
+        if self.hest_dataset_root_dir:
+            print(f"HEST Dataset Root: {self.hest_dataset_root_dir}")
+            print(f"HEST Patches directory: {self.hest_dataset_root_dir / 'patches'}")
+            print(f"HEST Tissue Seg directory: {self.hest_dataset_root_dir / 'tissue_seg'}")
+
         # Show all files in job directory
         print(f"\nAll files in job directory:")
         all_files = list(self.job_dir.glob("**/*"))
@@ -544,19 +517,36 @@ class PipelineManager:
         for sample_id in sample_ids:
             print(f"\n  Sample: {sample_id}")
             
-            # Search for files containing this sample ID
-            matching_files = list(self.job_dir.glob(f"**/*{sample_id}*"))
-            if matching_files:
-                print(f"    Found {len(matching_files)} files:")
-                for f in sorted(matching_files):
+            # Search for files containing this sample ID in job_dir and HEST dirs
+            search_roots = [self.job_dir]
+            if self.hest_dataset_root_dir:
+                search_roots.extend([self.hest_dataset_root_dir / "tissue_seg", self.hest_dataset_root_dir / "patches"])
+
+            found_files = []
+            for root in search_roots:
+                if root.exists():
+                    found_files.extend(list(root.glob(f"**/*{sample_id}*")))
+            
+            if found_files:
+                print(f"    Found {len(found_files)} files:")
+                for f in sorted(found_files):
                     if f.is_file():
-                        print(f"      {f.relative_to(self.job_dir)}")
+                        # Try to show relative path, fall back to absolute
+                        try:
+                            print(f"      {f.relative_to(self.job_dir)}")
+                        except ValueError:
+                            try:
+                                if self.hest_dataset_root_dir:
+                                    print(f"      (HEST) {f.relative_to(self.hest_dataset_root_dir)}")
+                                else:
+                                    print(f"      {f}")
+                            except ValueError:
+                                print(f"      {f}")
             else:
-                print(f"    No files found for this sample")
+                print(f"    No relevant files found for this sample in job or HEST directories.")
         
         print("="*60)
-    
-    def force_refresh_state(self):
+  
         """Force refresh the state by scanning all output directories."""
         print("Force refreshing state by scanning all output files...")
         
@@ -572,155 +562,120 @@ class PipelineManager:
         # Scan for all possible output patterns
         self._scan_existing_outputs()
         
-        # Also check common Trident output patterns
-        print("Checking common Trident output patterns...")
-        
-        # Check for various output directory structures that Trident might create
-        possible_output_dirs = [
-            self.job_dir,
-            self.job_dir / "segmentation",
-            self.job_dir / "coordinates",
-            self.job_dir / "features",
-            self.job_dir / "patches",
-            self.job_dir / "tissue_coordinates",
-            self.job_dir / "patch_features",
-        ]
-        
-        for sample_id in self.samples.keys():
-            # More comprehensive file search
-            for output_dir in possible_output_dirs:
-                if output_dir.exists():
-                    # Look for any file containing the sample ID
-                    for file_path in output_dir.glob(f"*{sample_id}*"):
-                        if file_path.is_file():
-                            filename = file_path.name.lower()
-                            
-                            # Determine file type based on name and content
-                            if any(keyword in filename for keyword in ['seg', 'mask', 'contour']):
-                                if not self.samples[sample_id].segmentation_done:
-                                    self._update_sample_state(
-                                        sample_id,
-                                        segmentation_done=True,
-                                        segmentation_path=str(file_path)
-                                    )
-                            elif any(keyword in filename for keyword in ['coord', 'patch', 'tile']):
-                                if not self.samples[sample_id].coordinates_done:
-                                    self._update_sample_state(
-                                        sample_id,
-                                        coordinates_done=True,
-                                        coordinates_path=str(file_path)
-                                    )
-                            elif any(keyword in filename for keyword in ['feat', 'embedding', 'feature']):
-                                if not self.samples[sample_id].features_done:
-                                    self._update_sample_state(
-                                        sample_id,
-                                        features_done=True,
-                                        features_path=str(file_path)
-                                    )
-        
         self._save_state()
         print("State refresh completed.")
         self.print_summary()
     
-    def convert_h5ad_to_h5(self, h5ad_path: str, h5_path: str) -> bool:
-        """Convert .h5ad file to .h5 format."""
+   
+        """Convert .h5ad file to .h5 format. (Simplified to copy if anndata not present)"""
         try:
-            # Try to import anndata
-            try:
-                import anndata as ad
-                use_anndata = True
-            except ImportError:
-                use_anndata = False
-                print(f"Warning: anndata not available, attempting simple conversion for {h5ad_path}")
+            import anndata as ad
             
-            if use_anndata:
-                # Read the .h5ad file
-                adata = ad.read_h5ad(h5ad_path)
+            print(f"Converting {h5ad_path} to {h5_path} using anndata...")
+            adata = ad.read_h5ad(h5ad_path)
+            
+            # Save as .h5 format that is compatible with Trident/h5py expectations
+            # Trident's H5 structure for patches/coords usually has 'coords' dataset
+            # and for features 'coords' and 'features' datasets.
+            with h5py.File(h5_path, 'w') as h5_file:
+                # Assuming 'X' in adata contains features if it's a feature file, or image data if it's a patch file
+                if hasattr(adata, 'X') and adata.X is not None:
+                    h5_file.create_dataset('X', data=adata.X, compression="gzip")
                 
-                # Save as .h5 format
-                with h5py.File(h5_path, 'w') as h5_file:
-                    # Save the main data matrix
-                    if hasattr(adata, 'X') and adata.X is not None:
-                        h5_file.create_dataset('X', data=adata.X)
+                # Try to map common anndata obs to 'coords' or other relevant datasets
+                if 'coords' in adata.obs.columns:
+                    h5_file.create_dataset('coords', data=adata.obs['coords'].values, compression="gzip")
+                elif 'x_coord' in adata.obs.columns and 'y_coord' in adata.obs.columns:
+                    # Create a 'coords' dataset from x,y
+                    coords_data = adata.obs[['x_coord', 'y_coord']].values
+                    h5_file.create_dataset('coords', data=coords_data, compression="gzip")
+                
+                # If it's a feature file, save features
+                if hasattr(adata, 'obsm') and 'X_spatial' in adata.obsm: # Example for spatial embeddings
+                    h5_file.create_dataset('features', data=adata.obsm['X_spatial'], compression="gzip")
+                elif 'features' in adata.obs.columns: # If features are directly in obs
+                     h5_file.create_dataset('features', data=adata.obs['features'].values, compression="gzip")
+                elif 'X' in h5_file and h5_file['X'].shape[1] > 2: # Heuristic: if X is not just coords
+                     # If X is already deemed features, copy it directly
+                    pass
                     
-                    # Save observations (cell/patch metadata)
-                    if hasattr(adata, 'obs') and len(adata.obs) > 0:
-                        obs_group = h5_file.create_group('obs')
-                        for col in adata.obs.columns:
-                            obs_group.create_dataset(col, data=adata.obs[col].values)
-                    
-                    # Save variables (feature metadata)
-                    if hasattr(adata, 'var') and len(adata.var) > 0:
-                        var_group = h5_file.create_group('var')
-                        for col in adata.var.columns:
-                            var_group.create_dataset(col, data=adata.var[col].values)
-                    
-                    # Save unstructured metadata
-                    if hasattr(adata, 'uns') and len(adata.uns) > 0:
-                        uns_group = h5_file.create_group('uns')
-                        for key, value in adata.uns.items():
-                            try:
-                                uns_group.create_dataset(key, data=value)
-                            except:
-                                # Skip if data can't be serialized
-                                pass
-            else:
-                # Simple approach: just copy the file with .h5 extension
-                # .h5ad files are actually HDF5 files, so they can often be read as .h5
-                import shutil
-                shutil.copy2(h5ad_path, h5_path)
-                print(f"Copied {h5ad_path} to {h5_path} (simple copy)")
+                # Store any relevant metadata as attributes
+                for key, value in adata.uns.items():
+                    if isinstance(value, (str, int, float, bool, list, dict)):
+                        try:
+                            h5_file.attrs[key] = json.dumps(value) if isinstance(value, (list, dict)) else value
+                        except TypeError:
+                            pass # Skip non-serializable attributes
             
             return True
             
+        except ImportError:
+            print(f"Warning: anndata not available. Attempting simple file copy for {h5ad_path}.")
+            try:
+                import shutil
+                shutil.copy2(h5ad_path, h5_path)
+                print(f"Copied {h5ad_path} to {h5_path} (simple copy). Note: Full anndata to Trident H5 conversion skipped.")
+                return True
+            except Exception as e:
+                print(f"Error during simple copy of {h5ad_path} to {h5_path}: {e}")
+                return False
         except Exception as e:
-            print(f"Warning: Could not convert {h5ad_path} to .h5 format: {e}")
+            print(f"Warning: Could not convert {h5ad_path} to .h5 format (Trident-compatible): {e}")
             return False
     
-    def ensure_h5_format(self):
-        """Convert any .h5ad files to .h5 format by renaming (they're compatible)."""
+  
+        """Convert any .h5ad files found in state to .h5 format.
+        This will attempt a proper conversion if anndata is available,
+        otherwise it will perform a simple file copy/rename.
+        """
         converted_count = 0
         
-        for sample_id, sample_state in self.samples.items():
-            # Check segmentation path
-            if sample_state.segmentation_path and sample_state.segmentation_path.endswith('.h5ad'):
-                h5_path = sample_state.segmentation_path.replace('.h5ad', '.h5')
-                try:
-                    import shutil
-                    shutil.copy2(sample_state.segmentation_path, h5_path)
-                    self._update_sample_state(sample_id, segmentation_path=h5_path)
-                    converted_count += 1
-                    print(f"Converted segmentation for {sample_id}: .h5ad -> .h5")
-                except Exception as e:
-                    print(f"Warning: Could not convert segmentation for {sample_id}: {e}")
+        # Iterate over a copy of keys as _update_sample_state modifies self.samples
+        for sample_id in list(self.samples.keys()):
+            sample_state = self.samples[sample_id]
+
+            # Check and convert segmentation path
+            if sample_state.segmentation_path and sample_state.segmentation_path.lower().endswith('.h5ad'):
+                original_path = Path(sample_state.segmentation_path)
+                h5_path = original_path.with_suffix('.h5')
+                if not h5_path.exists() or original_path.stat().st_mtime > h5_path.stat().st_mtime:
+                    print(f"Attempting to convert segmentation for {sample_id}: {original_path.name}")
+                    if self.convert_h5ad_to_h5(str(original_path), str(h5_path)):
+                        self._update_sample_state(sample_id, segmentation_path=str(h5_path))
+                        converted_count += 1
+                else:
+                    print(f"Skipping segmentation conversion for {sample_id}: .h5 version exists and is up-to-date.")
+                    self._update_sample_state(sample_id, segmentation_path=str(h5_path)) # Ensure state points to H5
             
-            # Check coordinates path
-            if sample_state.coordinates_path and sample_state.coordinates_path.endswith('.h5ad'):
-                h5_path = sample_state.coordinates_path.replace('.h5ad', '.h5')
-                try:
-                    import shutil
-                    shutil.copy2(sample_state.coordinates_path, h5_path)
-                    self._update_sample_state(sample_id, coordinates_path=h5_path)
-                    converted_count += 1
-                    print(f"Converted coordinates for {sample_id}: .h5ad -> .h5")
-                except Exception as e:
-                    print(f"Warning: Could not convert coordinates for {sample_id}: {e}")
-            
-            # Check features path
-            if sample_state.features_path and sample_state.features_path.endswith('.h5ad'):
-                h5_path = sample_state.features_path.replace('.h5ad', '.h5')
-                try:
-                    import shutil
-                    shutil.copy2(sample_state.features_path, h5_path)
-                    self._update_sample_state(sample_id, features_path=h5_path)
-                    converted_count += 1
-                    print(f"Converted features for {sample_id}: .h5ad -> .h5")
-                except Exception as e:
-                    print(f"Warning: Could not convert features for {sample_id}: {e}")
-        
+            # Check and convert coordinates path
+            if sample_state.coordinates_path and sample_state.coordinates_path.lower().endswith('.h5ad'):
+                original_path = Path(sample_state.coordinates_path)
+                h5_path = original_path.with_suffix('.h5')
+                if not h5_path.exists() or original_path.stat().st_mtime > h5_path.stat().st_mtime:
+                    print(f"Attempting to convert coordinates for {sample_id}: {original_path.name}")
+                    if self.convert_h5ad_to_h5(str(original_path), str(h5_path)):
+                        self._update_sample_state(sample_id, coordinates_path=str(h5_path))
+                        converted_count += 1
+                else:
+                    print(f"Skipping coordinates conversion for {sample_id}: .h5 version exists and is up-to-date.")
+                    self._update_sample_state(sample_id, coordinates_path=str(h5_path)) # Ensure state points to H5
+
+            # Check and convert features path
+            if sample_state.features_path and sample_state.features_path.lower().endswith('.h5ad'):
+                original_path = Path(sample_state.features_path)
+                h5_path = original_path.with_suffix('.h5')
+                if not h5_path.exists() or original_path.stat().st_mtime > h5_path.stat().st_mtime:
+                    print(f"Attempting to convert features for {sample_id}: {original_path.name}")
+                    if self.convert_h5ad_to_h5(str(original_path), str(h5_path)):
+                        self._update_sample_state(sample_id, features_path=str(h5_path))
+                        converted_count += 1
+                else:
+                    print(f"Skipping features conversion for {sample_id}: .h5 version exists and is up-to-date.")
+                    self._update_sample_state(sample_id, features_path=str(h5_path)) # Ensure state points to H5
+
         if converted_count > 0:
-            print(f"Successfully converted {converted_count} files from .h5ad to .h5 format")
+            print(f"Successfully converted/updated state for {converted_count} files from .h5ad to .h5 format.")
         else:
-            print("No .h5ad files found to convert")
+            print("No .h5ad files found needing conversion or all are up-to-date.")
         
         return converted_count
