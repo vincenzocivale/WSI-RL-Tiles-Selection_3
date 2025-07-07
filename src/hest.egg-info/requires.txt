@@ -1,0 +1,12 @@
+hestcore
+loguru
+numpy
+pandas
+tifffile
+packaging
+pillow
+matplotlib
+torch
+torchvision
+h5py
+tqdm
