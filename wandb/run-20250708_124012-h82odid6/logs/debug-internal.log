@@ -1,0 +1,6 @@
+{"time":"2025-07-08T12:40:13.816263482+02:00","level":"INFO","msg":"stream: starting","core version":"0.21.0"}
+{"time":"2025-07-08T12:40:14.13330268+02:00","level":"INFO","msg":"stream: created new stream","id":"h82odid6"}
+{"time":"2025-07-08T12:40:14.133356177+02:00","level":"INFO","msg":"stream: started","id":"h82odid6"}
+{"time":"2025-07-08T12:40:14.133386985+02:00","level":"INFO","msg":"sender: started","stream_id":"h82odid6"}
+{"time":"2025-07-08T12:40:14.133378472+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"h82odid6"}
+{"time":"2025-07-08T12:40:14.133426189+02:00","level":"INFO","msg":"handler: started","stream_id":"h82odid6"}

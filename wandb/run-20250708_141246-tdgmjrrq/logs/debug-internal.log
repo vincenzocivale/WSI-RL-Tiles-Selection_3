@@ -1,0 +1,6 @@
+{"time":"2025-07-08T14:12:46.423346625+02:00","level":"INFO","msg":"stream: starting","core version":"0.21.0"}
+{"time":"2025-07-08T14:12:46.775302235+02:00","level":"INFO","msg":"stream: created new stream","id":"tdgmjrrq"}
+{"time":"2025-07-08T14:12:46.775374407+02:00","level":"INFO","msg":"stream: started","id":"tdgmjrrq"}
+{"time":"2025-07-08T14:12:46.775395306+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"tdgmjrrq"}
+{"time":"2025-07-08T14:12:46.775456534+02:00","level":"INFO","msg":"sender: started","stream_id":"tdgmjrrq"}
+{"time":"2025-07-08T14:12:46.775405529+02:00","level":"INFO","msg":"handler: started","stream_id":"tdgmjrrq"}

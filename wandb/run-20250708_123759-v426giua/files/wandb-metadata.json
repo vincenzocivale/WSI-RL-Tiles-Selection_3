@@ -1,0 +1,47 @@
+{
+  "os":  "Linux-5.15.0-119-generic-x86_64-with-glibc2.35",
+  "python":  "CPython 3.10.12",
+  "startedAt":  "2025-07-08T10:37:59.166954Z",
+  "program":  "/home/vcivale/WSI-RL-Tiles-Selection_3/train_abmil_ucb_distillation.ipynb",
+  "codePath":  "train_abmil_ucb_distillation.ipynb",
+  "codePathLocal":  "train_abmil_ucb_distillation.ipynb",
+  "git":  {
+    "remote":  "https://github.com/vincenzocivale/WSI-RL-Tiles-Selection_3.git",
+    "commit":  "146101f4121973caacd08d73a162f7ea5f77d6a3"
+  },
+  "email":  "vincenzo.civale@edu.unifi.it",
+  "root":  "/home/vcivale/WSI-RL-Tiles-Selection_3",
+  "host":  "lechuck",
+  "executable":  "/home/vcivale/WSI-RL-Tiles-Selection_3/.venv/bin/python",
+  "cpu_count":  20,
+  "cpu_count_logical":  20,
+  "gpu":  "NVIDIA GeForce RTX 2080 Ti",
+  "gpu_count":  2,
+  "disk":  {
+    "/":  {
+      "total":  "502391562240",
+      "used":  "397854015488"
+    }
+  },
+  "memory":  {
+    "total":  "270352384000"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 2080 Ti",
+      "memoryTotal":  "11811160064",
+      "cudaCores":  4352,
+      "architecture":  "Turing",
+      "uuid":  "GPU-cc8ce99a-cb7e-a6c8-0ff6-832de3975e21"
+    },
+    {
+      "name":  "NVIDIA GeForce RTX 2080 Ti",
+      "memoryTotal":  "11811160064",
+      "cudaCores":  4352,
+      "architecture":  "Turing",
+      "uuid":  "GPU-872dc9a5-8054-1eff-5cf7-d55a444a5aa6"
+    }
+  ],
+  "cudaVersion":  "12.2",
+  "writerId":  "4380kfbd9llo0ewkdmcbgjz2xfnsxmd1"
+}

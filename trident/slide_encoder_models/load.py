@@ -33,6 +33,8 @@ def encoder_factory(model_name: str, pretrained: bool = True, freeze: bool = Tru
             enc = ThreadsSlideEncoder
         elif 'titan' in model_name:
             enc = TitanSlideEncoder
+        elif 'titan-ucb' in model_name:
+            enc = TitanUCBSlideEncoder
         elif 'prism' in model_name:
             enc = PRISMSlideEncoder
         elif 'chief' in model_name:
@@ -433,6 +435,8 @@ class TitanSlideEncoder(BaseSlideEncoder):
     def forward(self, batch, device='cuda'):
         z = self.model.encode_slide_from_patch_features(batch['features'].to(device), batch['coords'].to(device), batch['attributes']['patch_size_level0'])        
         return z
+
+
 
 
 class MeanSlideEncoder(BaseSlideEncoder):

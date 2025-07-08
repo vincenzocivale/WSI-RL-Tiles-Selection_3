@@ -1,0 +1,3 @@
+Epoch 1/5:   0%|          | 0/1 [00:00<?, ?it/s]
+/home/vcivale/WSI-RL-Tiles-Selection_3/src/ucb_kd_trainer.py:42: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  self.scaler = torch.cuda.amp.GradScaler()

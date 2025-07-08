@@ -1,0 +1,61 @@
+_wandb:
+    value:
+        cli_version: 0.21.0
+        e:
+            nqrq8vl3e5aviug99xiy9u0d1vuno01z:
+                codePath: train_abmil_ucb_distillation.ipynb
+                codePathLocal: train_abmil_ucb_distillation.ipynb
+                cpu_count: 20
+                cpu_count_logical: 20
+                cudaVersion: "12.2"
+                disk:
+                    /:
+                        total: "502391562240"
+                        used: "397854003200"
+                email: vincenzo.civale@edu.unifi.it
+                executable: /home/vcivale/WSI-RL-Tiles-Selection_3/.venv/bin/python
+                git:
+                    commit: 146101f4121973caacd08d73a162f7ea5f77d6a3
+                    remote: https://github.com/vincenzocivale/WSI-RL-Tiles-Selection_3.git
+                gpu: NVIDIA GeForce RTX 2080 Ti
+                gpu_count: 2
+                gpu_nvidia:
+                    - architecture: Turing
+                      cudaCores: 4352
+                      memoryTotal: "11811160064"
+                      name: NVIDIA GeForce RTX 2080 Ti
+                      uuid: GPU-cc8ce99a-cb7e-a6c8-0ff6-832de3975e21
+                    - architecture: Turing
+                      cudaCores: 4352
+                      memoryTotal: "11811160064"
+                      name: NVIDIA GeForce RTX 2080 Ti
+                      uuid: GPU-872dc9a5-8054-1eff-5cf7-d55a444a5aa6
+                host: lechuck
+                memory:
+                    total: "270352384000"
+                os: Linux-5.15.0-119-generic-x86_64-with-glibc2.35
+                program: /home/vcivale/WSI-RL-Tiles-Selection_3/train_abmil_ucb_distillation.ipynb
+                python: CPython 3.10.12
+                root: /home/vcivale/WSI-RL-Tiles-Selection_3
+                startedAt: "2025-07-08T10:37:55.127126Z"
+                writerId: nqrq8vl3e5aviug99xiy9u0d1vuno01z
+        m: []
+        python_version: 3.10.12
+        t:
+            "1":
+                - 1
+                - 49
+                - 51
+            "2":
+                - 1
+                - 49
+                - 51
+            "3":
+                - 1
+                - 2
+            "4": 3.10.12
+            "5": 0.21.0
+            "8":
+                - 1
+            "12": 0.21.0
+            "13": linux-x86_64

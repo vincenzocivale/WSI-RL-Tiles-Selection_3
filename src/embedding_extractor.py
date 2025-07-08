@@ -49,8 +49,9 @@ class EmbeddingExtractor:
         try:
             with h5py.File(h5_path, 'r') as hf:
                 patches = hf[self.patches_key][:]
+                coords = hf['coords'][:]
         except Exception as e:
-            print(f"Error reading patches from {h5_path}: {e}")
+            print(f"Error reading patches or coords from {h5_path}: {e}")
             return
 
         embeddings = []
@@ -81,7 +82,8 @@ class EmbeddingExtractor:
         try:
             with h5py.File(output_path, 'w') as hf:
                 hf.create_dataset('embeddings', data=all_embeddings)
-            print(f"Embeddings saved to {output_path}")
+                hf.create_dataset('coords', data=coords)
+            print(f"Embeddings and Coords saved to {output_path}")
         except Exception as e:
             print(f"Error saving embeddings to {output_path}: {e}")
 
